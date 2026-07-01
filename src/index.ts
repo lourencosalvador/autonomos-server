@@ -16,6 +16,8 @@ import { escrowReleaseRoute } from './routes/escrow-release.js';
 import { withdrawalRequestRoute } from './routes/withdrawal-request.js';
 import { adminApplicationsRoute, adminDashboardRoute, adminDecisionRoute, adminLoginRoute } from './routes/admin.js';
 import { verifyOTPRoute } from './routes/verify-otp.js';
+import { aiAssistantRoute } from './routes/ai-assistant.js';
+import { isOpenAIConfigured } from './lib/openai.js';
 
 const app = express();
 // Expo/Metro normalmente usa 8081. Para não conflitar, o backend usa 8082 por padrão.
@@ -36,6 +38,7 @@ app.get('/health', (req, res) => {
     stripeConfigured: isStripeConfigured,
     stripeMode,
     gpayConfigured: isGpayConfigured,
+    aiConfigured: isOpenAIConfigured,
     supabaseAdminConfigured: isSupabaseAdminConfigured,
     supabaseHost,
   });
@@ -51,6 +54,7 @@ app.post('/api/gpay/webhook', gpayWebhookRoute);
 app.post('/api/stripe/connect/onboard', stripeConnectOnboardRoute);
 app.post('/api/escrow/release', escrowReleaseRoute);
 app.post('/api/withdrawals/request', withdrawalRequestRoute);
+app.post('/api/ai/assistant', aiAssistantRoute);
 
 // Painel de aprovações (web)
 app.get('/admin', adminDashboardRoute);
@@ -65,6 +69,7 @@ app.listen(Number(PORT), HOST, () => {
   console.log(`💬 Stream configurado: ${process.env.STREAM_API_KEY && process.env.STREAM_API_SECRET ? '✅' : '❌'}`);
   console.log(`💳 Stripe configurado: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`🟢 GPay (Multicaixa/Referência) ativo: ${isGpayConfigured ? '✅' : '❌'}`);
+  console.log(`🤖 OpenAI (assistente IA) configurado: ${isOpenAIConfigured ? '✅' : '❌'}`);
 
   // Keep-alive: o plano free do Render hiberna após ~15 min de inatividade, e o 1º request
   // depois disso leva ~50s+ (cold start), estourando o tempo do pagamento. Este auto-ping
