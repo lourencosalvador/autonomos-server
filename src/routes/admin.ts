@@ -104,6 +104,86 @@ export async function adminDecisionRoute(req: Request, res: Response) {
   return res.json({ ok: true });
 }
 
+/** Totais da plataforma (clientes, prestadores, aprovados, pendentes). */
+export async function adminStatsRoute(req: Request, res: Response) {
+  if (!checkAdmin(req, res)) return;
+  if (!isSupabaseAdminConfigured || !supabaseAdmin) return res.status(500).json({ ok: false, message: 'Supabase admin não configurado.' });
+  const db = supabaseAdmin;
+
+  const count = async (filter: Record<string, string>) => {
+    let q = db.from('profiles').select('*', { count: 'exact', head: true });
+    for (const k of Object.keys(filter)) q = q.eq(k, filter[k]);
+    const { count } = await q;
+    return count || 0;
+  };
+
+  try {
+    const [clients, providers, providersApproved, providersPending] = await Promise.all([
+      count({ role: 'client' }),
+      count({ role: 'professional' }),
+      count({ role: 'professional', approval_status: 'approved' }),
+      count({ role: 'professional', approval_status: 'pending' }),
+    ]);
+    return res.json({ ok: true, clients, providers, providersApproved, providersPending });
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, message: e?.message || 'Erro ao obter estatísticas.' });
+  }
+}
+
+/** Cria um prestador (conta auth confirmada + perfil aprovado) diretamente pelo admin. */
+export async function adminCreateProviderRoute(req: Request, res: Response) {
+  if (!checkAdmin(req, res)) return;
+  if (!isSupabaseAdminConfigured || !supabaseAdmin) return res.status(500).json({ ok: false, message: 'Supabase admin não configurado.' });
+
+  const b: any = req.body || {};
+  const name = String(b.name || '').trim();
+  const email = String(b.email || '').trim().toLowerCase();
+  const password = String(b.password || '').trim();
+  const phone = String(b.phone || '').trim() || null;
+  const workArea = String(b.workArea || '').trim() || null;
+  const gender = String(b.gender || '').trim() || null;
+
+  if (!name || !email || password.length < 6) {
+    return res.status(400).json({ ok: false, message: 'Nome, email e senha (mín. 6 caracteres) são obrigatórios.' });
+  }
+
+  // 1) Cria o utilizador auth já confirmado (forma correta via admin API).
+  const { data: created, error: cErr } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { full_name: name },
+  });
+  if (cErr || !created?.user) {
+    const msg = String(cErr?.message || 'Falha ao criar utilizador.');
+    const dup = /already|exists|registered|duplicate/i.test(msg);
+    return res.status(400).json({ ok: false, message: dup ? 'Já existe uma conta com este email.' : msg });
+  }
+  const id = created.user.id;
+
+  // 2) Perfil como prestador APROVADO (resiliente a colunas opcionais em falta).
+  const full: any = {
+    id,
+    role: 'professional',
+    name,
+    phone,
+    work_area: workArea,
+    gender,
+    approval_status: 'approved',
+    onboarding_completed: true,
+  };
+  let { error: pErr } = await supabaseAdmin.from('profiles').upsert(full, { onConflict: 'id' });
+  for (let i = 0; i < 4 && pErr; i++) {
+    const m = /could not find the '(\w+)' column/i.exec(String((pErr as any)?.message || ''));
+    if (!m || !(m[1] in full)) break;
+    delete full[m[1]];
+    ({ error: pErr } = await supabaseAdmin.from('profiles').upsert(full, { onConflict: 'id' }));
+  }
+  if (pErr) return res.status(500).json({ ok: false, message: 'Conta criada, mas o perfil falhou: ' + pErr.message });
+
+  return res.json({ ok: true, id, email });
+}
+
 export function adminDashboardRoute(_req: Request, res: Response) {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(DASHBOARD_HTML);
@@ -153,6 +233,20 @@ const DASHBOARD_HTML = `<!doctype html>
   .full{width:100%;background:linear-gradient(120deg,var(--deep),var(--cyan));color:#fff;border:none;border-radius:12px;padding:13px;font-weight:800;cursor:pointer;font-size:14px;}
   .err{color:#b91c1c;font-size:12px;font-weight:700;min-height:16px;margin-top:4px;}
   .hide{display:none;}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px;}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px 18px;box-shadow:0 6px 20px rgba(3,70,96,.05);position:relative;overflow:hidden;}
+  .stat::after{content:'';position:absolute;right:-18px;top:-18px;width:60px;height:60px;border-radius:50%;background:linear-gradient(120deg,var(--cyan),transparent);opacity:.12;}
+  .stat span{font-size:12px;font-weight:700;color:var(--muted);}
+  .stat b{display:block;font-size:30px;font-weight:800;color:var(--deep);margin-top:4px;line-height:1;}
+  .tab-add{background:#ecfeff;color:var(--deep);border-color:#a5f3fc;}
+  .form{background:#fff;border:1px solid var(--line);border-radius:18px;padding:24px;max-width:660px;box-shadow:0 6px 20px rgba(3,70,96,.05);}
+  .form h3{margin:0 0 4px;font-size:19px;}
+  .formsub{color:var(--muted);font-size:13px;margin:0 0 20px;}
+  .formGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:10px;}
+  .field label{display:block;font-size:12px;font-weight:800;color:var(--muted);margin-bottom:6px;}
+  .field .inp{margin-bottom:0;}
+  .ok{color:#047857;font-size:13px;font-weight:800;min-height:16px;margin-top:10px;}
+  @media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr);}.formGrid{grid-template-columns:1fr;}}
 </style>
 </head>
 <body>
@@ -173,12 +267,44 @@ const DASHBOARD_HTML = `<!doctype html>
       <button class="tab" onclick="logout()">Sair</button>
     </div>
     <div class="wrap">
+      <div class="stats">
+        <div class="stat"><span>Clientes</span><b id="stClients">—</b></div>
+        <div class="stat"><span>Prestadores</span><b id="stProviders">—</b></div>
+        <div class="stat"><span>Aprovados</span><b id="stApproved">—</b></div>
+        <div class="stat"><span>Pendentes</span><b id="stPending">—</b></div>
+      </div>
       <div class="tabs">
         <button class="tab active" data-st="pending" onclick="setTab('pending')">Pendentes</button>
         <button class="tab" data-st="approved" onclick="setTab('approved')">Aprovados</button>
         <button class="tab" data-st="rejected" onclick="setTab('rejected')">Recusados</button>
+        <button class="tab tab-add" data-st="cadastrar" onclick="setTab('cadastrar')">+ Cadastrar</button>
       </div>
       <div id="list" class="grid"></div>
+      <div id="registerForm" class="hide">
+        <div class="form">
+          <h3>Cadastrar prestador</h3>
+          <p class="formsub">Cria uma conta de prestador já aprovada. A pessoa entra na app com este email e senha.</p>
+          <div class="formGrid">
+            <div class="field"><label>Nome</label><input id="fName" class="inp" placeholder="Ex: Edson Pintor" /></div>
+            <div class="field"><label>Email</label><input id="fEmail" class="inp" type="email" placeholder="email@exemplo.com" /></div>
+            <div class="field"><label>Senha</label><input id="fPass" class="inp" type="text" placeholder="mín. 6 caracteres" /></div>
+            <div class="field"><label>Telefone</label><input id="fPhone" class="inp" placeholder="9XX XXX XXX" /></div>
+            <div class="field"><label>Área de trabalho</label><select id="fArea" class="inp">
+              <option value="">Selecionar…</option>
+              <option>Pintura</option><option>Canalização</option><option>Eletricista</option><option>Limpeza</option>
+              <option>Make Up</option><option>Manicure &amp; Pedicure</option><option>Barbeiro</option><option>Cabeleireiro</option>
+              <option>Cocktail</option><option>Decoração de Eventos</option><option>Personal Trainer</option><option>Design Gráfico</option>
+              <option>Fotografia</option><option>Suporte Técnico</option><option>Explicações</option><option>Fisioterapia</option>
+              <option>Nutrição</option><option>Pastelaria</option><option>Costura</option>
+            </select></div>
+            <div class="field"><label>Género</label><select id="fGender" class="inp">
+              <option value="">—</option><option>Masculino</option><option>Feminino</option><option>Outro</option>
+            </select></div>
+          </div>
+          <button class="full" style="margin-top:10px" onclick="createProvider()">Criar prestador</button>
+          <div id="formMsg" class="err"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -210,8 +336,37 @@ const DASHBOARD_HTML = `<!doctype html>
       .catch(function(){ document.getElementById('loginErr').textContent='Erro de ligação.'; });
   }
   function logout(){ sessionStorage.removeItem('adminKey'); KEY=''; document.getElementById('appView').classList.add('hide'); document.getElementById('loginView').classList.remove('hide'); }
-  function showApp(){ document.getElementById('loginView').classList.add('hide'); document.getElementById('appView').classList.remove('hide'); load(); }
-  function setTab(st){ TAB=st; var ts=document.querySelectorAll('.tab[data-st]'); for(var i=0;i<ts.length;i++){ ts[i].classList.toggle('active', ts[i].getAttribute('data-st')===st); } load(); }
+  function showApp(){ document.getElementById('loginView').classList.add('hide'); document.getElementById('appView').classList.remove('hide'); loadStats(); load(); }
+  function setTab(st){ TAB=st; var ts=document.querySelectorAll('.tab[data-st]'); for(var i=0;i<ts.length;i++){ ts[i].classList.toggle('active', ts[i].getAttribute('data-st')===st); }
+    var isReg = (st==='cadastrar');
+    document.getElementById('list').classList.toggle('hide', isReg);
+    document.getElementById('registerForm').classList.toggle('hide', !isReg);
+    if(!isReg) load();
+  }
+
+  function setStat(id,v){ var e=document.getElementById(id); if(e) e.textContent = (v==null?'—':String(v)); }
+  function loadStats(){
+    fetch('/api/admin/stats',{headers:{'x-admin-key':KEY}})
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if(!j||!j.ok) return; setStat('stClients',j.clients); setStat('stProviders',j.providers); setStat('stApproved',j.providersApproved); setStat('stPending',j.providersPending); })
+      .catch(function(){});
+  }
+
+  function val(id){ return (document.getElementById(id).value||'').trim(); }
+  function createProvider(){
+    var body = { name:val('fName'), email:val('fEmail'), password:val('fPass'), phone:val('fPhone'), workArea:val('fArea'), gender:val('fGender') };
+    var msg = document.getElementById('formMsg'); msg.className='err'; msg.textContent='A criar…';
+    fetch('/api/admin/create-provider',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':KEY},body:JSON.stringify(body)})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j&&j.ok){ msg.className='ok'; msg.textContent='✅ Prestador criado: '+body.email;
+          ['fName','fEmail','fPass','fPhone'].forEach(function(id){ document.getElementById(id).value=''; });
+          document.getElementById('fArea').value=''; document.getElementById('fGender').value='';
+          loadStats();
+        } else { msg.className='err'; msg.textContent=(j&&j.message)||'Falhou.'; }
+      })
+      .catch(function(){ msg.className='err'; msg.textContent='Erro de ligação.'; });
+  }
 
   function load(){
     document.getElementById('list').innerHTML = '<div class="empty">A carregar…</div>';
@@ -257,7 +412,7 @@ const DASHBOARD_HTML = `<!doctype html>
     if(decision==='rejected'){ note = prompt('Motivo da recusa (opcional):')||''; }
     fetch('/api/admin/decision',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':KEY},body:JSON.stringify({providerId:id,decision:decision,note:note,source:source})})
       .then(function(r){return r.json();})
-      .then(function(j){ if(j&&j.ok){ load(); } else { alert((j&&j.message)||'Falhou.'); } })
+      .then(function(j){ if(j&&j.ok){ load(); loadStats(); } else { alert((j&&j.message)||'Falhou.'); } })
       .catch(function(){ alert('Erro de ligação.'); });
   }
 

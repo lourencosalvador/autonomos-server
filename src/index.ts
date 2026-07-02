@@ -14,7 +14,7 @@ import { stripeCreatePaymentIntentRoute } from './routes/stripe-create-payment-i
 import { stripeWebhookRoute } from './routes/stripe-webhook.js';
 import { escrowReleaseRoute } from './routes/escrow-release.js';
 import { withdrawalRequestRoute } from './routes/withdrawal-request.js';
-import { adminApplicationsRoute, adminDashboardRoute, adminDecisionRoute, adminLoginRoute } from './routes/admin.js';
+import { adminApplicationsRoute, adminCreateProviderRoute, adminDashboardRoute, adminDecisionRoute, adminLoginRoute, adminStatsRoute } from './routes/admin.js';
 import { verifyOTPRoute } from './routes/verify-otp.js';
 import { aiAssistantRoute } from './routes/ai-assistant.js';
 import { isOpenAIConfigured } from './lib/openai.js';
@@ -61,6 +61,8 @@ app.get('/admin', adminDashboardRoute);
 app.post('/api/admin/login', adminLoginRoute);
 app.get('/api/admin/applications', adminApplicationsRoute);
 app.post('/api/admin/decision', adminDecisionRoute);
+app.get('/api/admin/stats', adminStatsRoute);
+app.post('/api/admin/create-provider', adminCreateProviderRoute);
 
 app.listen(Number(PORT), HOST, () => {
   console.log(`🚀 Servidor rodando em http://${HOST}:${PORT}`);
