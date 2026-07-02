@@ -28,8 +28,8 @@ app.use(cors());
 
 // Stripe webhook precisa do body RAW para validar assinatura
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookRoute);
-// JSON para o resto das rotas
-app.use(express.json());
+// JSON para o resto das rotas. Limite maior para uploads base64 (BI/certificados no admin).
+app.use(express.json({ limit: '20mb' }));
 
 app.get('/health', (req, res) => {
   res.json({

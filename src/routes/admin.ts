@@ -130,10 +130,39 @@ export async function adminStatsRoute(req: Request, res: Response) {
   }
 }
 
-/** Cria um prestador (conta auth confirmada + perfil aprovado) diretamente pelo admin. */
+const PROVIDER_DOCS_BUCKET = 'provider-docs';
+
+async function ensureBucket(db: any, id: string) {
+  try {
+    await db.storage.createBucket(id, { public: true });
+  } catch {
+    // já existe — ignora
+  }
+}
+
+/** Upload de um data URL (base64) para o Storage → devolve o URL público. */
+async function uploadDataUrl(db: any, folder: string, dataUrl: string): Promise<string | null> {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl || ''));
+  if (!m) return null;
+  const contentType = m[1];
+  const buffer = Buffer.from(m[2], 'base64');
+  const ext = (contentType.split('/')[1] || 'bin').split('+')[0];
+  const path = `${folder}/${Date.now()}_${Math.random().toString(16).slice(2)}.${ext}`;
+  const { error } = await db.storage.from(PROVIDER_DOCS_BUCKET).upload(path, buffer, { contentType, upsert: false });
+  if (error) throw error;
+  const { data } = db.storage.from(PROVIDER_DOCS_BUCKET).getPublicUrl(path);
+  return data?.publicUrl || null;
+}
+
+/**
+ * Cria um prestador COMPLETO diretamente pelo admin: conta auth confirmada + perfil
+ * aprovado com onboarding concluído (bio, experiência, disponibilidade, foto, BI e
+ * certificados) — para não precisar de passar pela tela de configuração no app.
+ */
 export async function adminCreateProviderRoute(req: Request, res: Response) {
   if (!checkAdmin(req, res)) return;
   if (!isSupabaseAdminConfigured || !supabaseAdmin) return res.status(500).json({ ok: false, message: 'Supabase admin não configurado.' });
+  const db = supabaseAdmin;
 
   const b: any = req.body || {};
   const name = String(b.name || '').trim();
@@ -142,13 +171,17 @@ export async function adminCreateProviderRoute(req: Request, res: Response) {
   const phone = String(b.phone || '').trim() || null;
   const workArea = String(b.workArea || '').trim() || null;
   const gender = String(b.gender || '').trim() || null;
+  const bio = String(b.bio || '').trim() || null;
+  const workDescription = String(b.workDescription || '').trim() || null;
+  const experienceTime = String(b.experienceTime || '').trim() || null;
+  const availability = b.availability && typeof b.availability === 'object' ? b.availability : null;
 
   if (!name || !email || password.length < 6) {
     return res.status(400).json({ ok: false, message: 'Nome, email e senha (mín. 6 caracteres) são obrigatórios.' });
   }
 
-  // 1) Cria o utilizador auth já confirmado (forma correta via admin API).
-  const { data: created, error: cErr } = await supabaseAdmin.auth.admin.createUser({
+  // 1) Conta auth já confirmada.
+  const { data: created, error: cErr } = await db.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
@@ -161,7 +194,27 @@ export async function adminCreateProviderRoute(req: Request, res: Response) {
   }
   const id = created.user.id;
 
-  // 2) Perfil como prestador APROVADO (resiliente a colunas opcionais em falta).
+  // 2) Uploads opcionais (foto, BI, certificados).
+  let avatarUrl: string | null = null;
+  let idDocUrl: string | null = null;
+  const certUrls: { name: string; file_url: string }[] = [];
+  try {
+    const hasUpload = b.avatar || b.idDocument || (Array.isArray(b.certificates) && b.certificates.length);
+    if (hasUpload) await ensureBucket(db, PROVIDER_DOCS_BUCKET);
+    if (b.avatar) avatarUrl = await uploadDataUrl(db, `${id}/avatar`, b.avatar);
+    if (b.idDocument) idDocUrl = await uploadDataUrl(db, `${id}/bi`, b.idDocument);
+    if (Array.isArray(b.certificates)) {
+      for (const c of b.certificates.slice(0, 10)) {
+        if (!c?.dataUrl) continue;
+        const url = await uploadDataUrl(db, `${id}/certs`, c.dataUrl);
+        if (url) certUrls.push({ name: String(c.name || 'Certificado'), file_url: url });
+      }
+    }
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, message: 'Conta criada, mas o upload falhou: ' + (e?.message || '') });
+  }
+
+  // 3) Perfil prestador APROVADO + onboarding CONCLUÍDO (resiliente a colunas em falta).
   const full: any = {
     id,
     role: 'professional',
@@ -169,17 +222,29 @@ export async function adminCreateProviderRoute(req: Request, res: Response) {
     phone,
     work_area: workArea,
     gender,
+    bio,
+    work_description: workDescription,
+    experience_time: experienceTime,
+    availability,
     approval_status: 'approved',
     onboarding_completed: true,
   };
-  let { error: pErr } = await supabaseAdmin.from('profiles').upsert(full, { onConflict: 'id' });
-  for (let i = 0; i < 4 && pErr; i++) {
+  if (avatarUrl) full.avatar_url = avatarUrl;
+  if (idDocUrl) full.id_document_url = idDocUrl;
+
+  let { error: pErr } = await db.from('profiles').upsert(full, { onConflict: 'id' });
+  for (let i = 0; i < 6 && pErr; i++) {
     const m = /could not find the '(\w+)' column/i.exec(String((pErr as any)?.message || ''));
     if (!m || !(m[1] in full)) break;
     delete full[m[1]];
-    ({ error: pErr } = await supabaseAdmin.from('profiles').upsert(full, { onConflict: 'id' }));
+    ({ error: pErr } = await db.from('profiles').upsert(full, { onConflict: 'id' }));
   }
   if (pErr) return res.status(500).json({ ok: false, message: 'Conta criada, mas o perfil falhou: ' + pErr.message });
+
+  // 4) Certificados na tabela.
+  if (certUrls.length) {
+    await db.from('provider_certificates').insert(certUrls.map((c) => ({ provider_id: id, name: c.name, file_url: c.file_url })) as any);
+  }
 
   return res.json({ ok: true, id, email });
 }
@@ -246,6 +311,12 @@ const DASHBOARD_HTML = `<!doctype html>
   .field label{display:block;font-size:12px;font-weight:800;color:var(--muted);margin-bottom:6px;}
   .field .inp{margin-bottom:0;}
   .ok{color:#047857;font-size:13px;font-weight:800;min-height:16px;margin-top:10px;}
+  .ta{width:100%;border:1px solid var(--line);border-radius:12px;padding:12px;font-size:14px;font-family:inherit;min-height:80px;resize:vertical;box-sizing:border-box;}
+  .file{width:100%;border:1px dashed #a5f3fc;border-radius:12px;padding:11px;font-size:13px;background:#f0fdff;box-sizing:border-box;}
+  .sect{font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin:22px 0 12px;border-top:1px solid var(--line);padding-top:18px;}
+  .days{display:flex;flex-wrap:wrap;gap:8px;}
+  .day{width:44px;height:40px;border-radius:12px;border:1px solid var(--line);background:#f4f6f8;color:#9ca3af;font-weight:800;font-size:12px;cursor:pointer;}
+  .day.on{background:var(--cyan);color:#fff;border-color:var(--cyan);}
   @media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr);}.formGrid{grid-template-columns:1fr;}}
 </style>
 </head>
@@ -301,7 +372,39 @@ const DASHBOARD_HTML = `<!doctype html>
               <option value="">—</option><option>Masculino</option><option>Feminino</option><option>Outro</option>
             </select></div>
           </div>
-          <button class="full" style="margin-top:10px" onclick="createProvider()">Criar prestador</button>
+
+          <div class="sect">Perfil profissional (para saltar o onboarding)</div>
+          <div class="field" style="margin-bottom:14px"><label>Biografia</label><textarea id="fBio" class="ta" placeholder="História profissional do prestador…"></textarea></div>
+          <div class="field" style="margin-bottom:14px"><label>Descrição do trabalho</label><textarea id="fWork" class="ta" placeholder="Que serviços oferece, diferenciais…"></textarea></div>
+          <div class="formGrid">
+            <div class="field"><label>Experiência</label><select id="fExp" class="inp">
+              <option value="">—</option><option value="lt1">Menos de 1 ano</option><option value="2">2 anos</option><option value="3plus">3 anos ou mais</option>
+            </select></div>
+            <div class="field"><label>Horário</label>
+              <div style="display:flex;gap:8px;">
+                <input id="fStart" class="inp" value="08:00" placeholder="08:00" style="margin-bottom:0" />
+                <input id="fEnd" class="inp" value="18:00" placeholder="18:00" style="margin-bottom:0" />
+              </div>
+            </div>
+          </div>
+          <div class="field" style="margin-top:14px"><label>Dias disponíveis</label>
+            <div class="days" id="fDays">
+              <button type="button" class="day on" data-d="1" onclick="this.classList.toggle('on')">Seg</button>
+              <button type="button" class="day on" data-d="2" onclick="this.classList.toggle('on')">Ter</button>
+              <button type="button" class="day on" data-d="3" onclick="this.classList.toggle('on')">Qua</button>
+              <button type="button" class="day on" data-d="4" onclick="this.classList.toggle('on')">Qui</button>
+              <button type="button" class="day on" data-d="5" onclick="this.classList.toggle('on')">Sex</button>
+              <button type="button" class="day" data-d="6" onclick="this.classList.toggle('on')">Sáb</button>
+              <button type="button" class="day" data-d="7" onclick="this.classList.toggle('on')">Dom</button>
+            </div>
+          </div>
+
+          <div class="sect">Documentos</div>
+          <div class="field" style="margin-bottom:14px"><label>Foto de perfil (imagem)</label><input id="fPhoto" class="file" type="file" accept="image/*" /></div>
+          <div class="field" style="margin-bottom:14px"><label>Bilhete de Identidade (imagem ou PDF)</label><input id="fBI" class="file" type="file" accept="image/*,application/pdf" /></div>
+          <div class="field" style="margin-bottom:6px"><label>Certificados (pode escolher vários)</label><input id="fCerts" class="file" type="file" accept="image/*,application/pdf" multiple /></div>
+
+          <button class="full" style="margin-top:16px" onclick="createProvider()">Criar prestador</button>
           <div id="formMsg" class="err"></div>
         </div>
       </div>
@@ -353,19 +456,39 @@ const DASHBOARD_HTML = `<!doctype html>
   }
 
   function val(id){ return (document.getElementById(id).value||'').trim(); }
+  function fileToDataUrl(file){ return new Promise(function(resolve){ if(!file){ resolve(null); return; } var r=new FileReader(); r.onload=function(){ resolve(r.result); }; r.onerror=function(){ resolve(null); }; r.readAsDataURL(file); }); }
+  function resetForm(){
+    ['fName','fEmail','fPass','fPhone','fBio','fWork'].forEach(function(id){ document.getElementById(id).value=''; });
+    ['fArea','fGender','fExp'].forEach(function(id){ document.getElementById(id).value=''; });
+    ['fPhoto','fBI','fCerts'].forEach(function(id){ document.getElementById(id).value=''; });
+  }
   function createProvider(){
-    var body = { name:val('fName'), email:val('fEmail'), password:val('fPass'), phone:val('fPhone'), workArea:val('fArea'), gender:val('fGender') };
     var msg = document.getElementById('formMsg'); msg.className='err'; msg.textContent='A criar…';
-    fetch('/api/admin/create-provider',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':KEY},body:JSON.stringify(body)})
+    var em = val('fEmail');
+    var days=[]; var ds=document.querySelectorAll('#fDays .day.on');
+    for(var i=0;i<ds.length;i++){ days.push(parseInt(ds[i].getAttribute('data-d'),10)); }
+    var photo=document.getElementById('fPhoto').files[0];
+    var bi=document.getElementById('fBI').files[0];
+    var certFiles=document.getElementById('fCerts').files;
+    var certPromises=[].map.call(certFiles,function(f){ return fileToDataUrl(f).then(function(d){ return { name:f.name, dataUrl:d }; }); });
+
+    Promise.all([ fileToDataUrl(photo), fileToDataUrl(bi), Promise.all(certPromises) ])
+      .then(function(all){
+        var body = {
+          name:val('fName'), email:em, password:val('fPass'), phone:val('fPhone'),
+          workArea:val('fArea'), gender:val('fGender'),
+          bio:val('fBio'), workDescription:val('fWork'), experienceTime:val('fExp'),
+          availability: days.length ? { days:days, start:val('fStart'), end:val('fEnd') } : null,
+          avatar: all[0], idDocument: all[1], certificates: all[2]
+        };
+        return fetch('/api/admin/create-provider',{method:'POST',headers:{'Content-Type':'application/json','x-admin-key':KEY},body:JSON.stringify(body)});
+      })
       .then(function(r){ return r.json(); })
       .then(function(j){
-        if(j&&j.ok){ msg.className='ok'; msg.textContent='✅ Prestador criado: '+body.email;
-          ['fName','fEmail','fPass','fPhone'].forEach(function(id){ document.getElementById(id).value=''; });
-          document.getElementById('fArea').value=''; document.getElementById('fGender').value='';
-          loadStats();
-        } else { msg.className='err'; msg.textContent=(j&&j.message)||'Falhou.'; }
+        if(j&&j.ok){ msg.className='ok'; msg.textContent='✅ Prestador criado: '+em; resetForm(); loadStats(); }
+        else { msg.className='err'; msg.textContent=(j&&j.message)||'Falhou.'; }
       })
-      .catch(function(){ msg.className='err'; msg.textContent='Erro de ligação.'; });
+      .catch(function(){ msg.className='err'; msg.textContent='Erro de ligação (ficheiros muito grandes?).'; });
   }
 
   function load(){
