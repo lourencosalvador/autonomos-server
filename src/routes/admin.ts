@@ -175,6 +175,9 @@ export async function adminCreateProviderRoute(req: Request, res: Response) {
   const workDescription = String(b.workDescription || '').trim() || null;
   const experienceTime = String(b.experienceTime || '').trim() || null;
   const availability = b.availability && typeof b.availability === 'object' ? b.availability : null;
+  const specialty = String(b.specialty || '').trim() || null;
+  const province = String(b.province || '').trim() || null;
+  const municipality = String(b.municipality || '').trim() || null;
 
   if (!name || !email || password.length < 6) {
     return res.status(400).json({ ok: false, message: 'Nome, email e senha (mín. 6 caracteres) são obrigatórios.' });
@@ -222,6 +225,9 @@ export async function adminCreateProviderRoute(req: Request, res: Response) {
     phone,
     work_area: workArea,
     gender,
+    specialty,
+    province,
+    municipality,
     bio,
     work_description: workDescription,
     experience_time: experienceTime,
@@ -371,6 +377,9 @@ const DASHBOARD_HTML = `<!doctype html>
             <div class="field"><label>Género</label><select id="fGender" class="inp">
               <option value="">—</option><option>Masculino</option><option>Feminino</option><option>Outro</option>
             </select></div>
+            <div class="field"><label>Especialidade</label><input id="fSpecialty" class="inp" placeholder="Ex: Frontend Next, corte escovinha" /></div>
+            <div class="field"><label>Província</label><select id="fProvince" class="inp" onchange="onProvince()"><option value="">Selecionar…</option></select></div>
+            <div class="field"><label>Município</label><select id="fMunicipality" class="inp"><option value="">Selecionar…</option></select></div>
           </div>
 
           <div class="sect">Perfil profissional (para saltar o onboarding)</div>
@@ -416,6 +425,28 @@ const DASHBOARD_HTML = `<!doctype html>
   var TAB = 'pending';
   var EXP = { lt1:'Menos de 1 ano', '2':'2 anos', '3plus':'3 anos ou mais' };
   var DAYS = ['','Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  var LOCS = {
+    'Luanda':['Luanda','Belas','Cacuaco','Cazenga','Icolo e Bengo','Kilamba Kiaxi','Quiçama','Talatona','Viana'],
+    'Bengo':['Caxito','Ambriz','Dande','Nambuangongo'],
+    'Benguela':['Benguela','Lobito','Catumbela','Baía Farta','Cubal','Ganda'],
+    'Bié':['Kuito','Andulo','Camacupa','Chinguar'],
+    'Cabinda':['Cabinda','Cacongo','Buco-Zau','Belize'],
+    'Cuando Cubango':['Menongue','Cuito Cuanavale','Mavinga'],
+    'Cuanza Norte':['Ndalatando','Cazengo','Lucala','Golungo Alto'],
+    'Cuanza Sul':['Sumbe','Porto Amboim','Gabela','Waku Kungo'],
+    'Cunene':['Ondjiva','Cahama','Cuvelai','Namacunde'],
+    'Huambo':['Huambo','Caála','Bailundo','Longonjo'],
+    'Huíla':['Lubango','Matala','Caconda','Chibia','Humpata'],
+    'Lunda Norte':['Dundo','Lucapa','Cambulo'],
+    'Lunda Sul':['Saurimo','Muconda','Dala'],
+    'Malanje':['Malanje','Cacuso','Calandula','Cangandala'],
+    'Moxico':['Luena','Camanongue','Léua','Luau'],
+    'Namibe':['Moçâmedes','Tômbwa','Bibala','Camucuio'],
+    'Uíge':['Uíge','Negage','Maquela do Zombo','Songo'],
+    'Zaire':['Mbanza Kongo','Soyo','Nzeto','Tomboco']
+  };
+  function populateProvinces(){ var s=document.getElementById('fProvince'); if(!s||s.options.length>1) return; Object.keys(LOCS).forEach(function(p){ var o=document.createElement('option'); o.value=p; o.textContent=p; s.appendChild(o); }); }
+  function onProvince(){ var p=document.getElementById('fProvince').value; var m=document.getElementById('fMunicipality'); m.innerHTML='<option value="">Selecionar…</option>'; (LOCS[p]||[]).forEach(function(x){ var o=document.createElement('option'); o.value=x; o.textContent=x; m.appendChild(o); }); }
 
   function fmtAvail(a){
     if(!a || !a.days || !a.days.length) return 'Não definido';
@@ -439,7 +470,7 @@ const DASHBOARD_HTML = `<!doctype html>
       .catch(function(){ document.getElementById('loginErr').textContent='Erro de ligação.'; });
   }
   function logout(){ sessionStorage.removeItem('adminKey'); KEY=''; document.getElementById('appView').classList.add('hide'); document.getElementById('loginView').classList.remove('hide'); }
-  function showApp(){ document.getElementById('loginView').classList.add('hide'); document.getElementById('appView').classList.remove('hide'); loadStats(); load(); }
+  function showApp(){ document.getElementById('loginView').classList.add('hide'); document.getElementById('appView').classList.remove('hide'); populateProvinces(); loadStats(); load(); }
   function setTab(st){ TAB=st; var ts=document.querySelectorAll('.tab[data-st]'); for(var i=0;i<ts.length;i++){ ts[i].classList.toggle('active', ts[i].getAttribute('data-st')===st); }
     var isReg = (st==='cadastrar');
     document.getElementById('list').classList.toggle('hide', isReg);
@@ -458,8 +489,8 @@ const DASHBOARD_HTML = `<!doctype html>
   function val(id){ return (document.getElementById(id).value||'').trim(); }
   function fileToDataUrl(file){ return new Promise(function(resolve){ if(!file){ resolve(null); return; } var r=new FileReader(); r.onload=function(){ resolve(r.result); }; r.onerror=function(){ resolve(null); }; r.readAsDataURL(file); }); }
   function resetForm(){
-    ['fName','fEmail','fPass','fPhone','fBio','fWork'].forEach(function(id){ document.getElementById(id).value=''; });
-    ['fArea','fGender','fExp'].forEach(function(id){ document.getElementById(id).value=''; });
+    ['fName','fEmail','fPass','fPhone','fBio','fWork','fSpecialty'].forEach(function(id){ document.getElementById(id).value=''; });
+    ['fArea','fGender','fExp','fProvince','fMunicipality'].forEach(function(id){ document.getElementById(id).value=''; });
     ['fPhoto','fBI','fCerts'].forEach(function(id){ document.getElementById(id).value=''; });
   }
   function createProvider(){
@@ -477,6 +508,7 @@ const DASHBOARD_HTML = `<!doctype html>
         var body = {
           name:val('fName'), email:em, password:val('fPass'), phone:val('fPhone'),
           workArea:val('fArea'), gender:val('fGender'),
+          specialty:val('fSpecialty'), province:val('fProvince'), municipality:val('fMunicipality'),
           bio:val('fBio'), workDescription:val('fWork'), experienceTime:val('fExp'),
           availability: days.length ? { days:days, start:val('fStart'), end:val('fEnd') } : null,
           avatar: all[0], idDocument: all[1], certificates: all[2]

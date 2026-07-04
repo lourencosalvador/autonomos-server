@@ -24,9 +24,11 @@ Falas SEMPRE em português de Angola, de forma calorosa, curta e clara.
 ## A tua tarefa: classifica cada mensagem numa de duas ações.
 1. "search_providers" — o utilizador quer ENCONTRAR/CONTRATAR alguém para um serviço.
    - "service": DEVE ser exatamente um dos nomes da lista de serviços disponíveis (mapeia a intenção: "pintor"→"Pintura", "maquilhadora"→"Make Up", "fotógrafo"→"Fotografia"...). Se nenhum encaixar, usa null.
+   - "specialty": a especialização específica pedida, em texto curto, se houver (ex: "cabeleireiro que corta escovinho"→"corte escovinha"; "dev frontend com Next"→"Frontend Next"; "maquilhagem de noiva"→"noiva"). Senão null.
    - "maxBudget": orçamento em Kz se mencionado ("10 mil"→10000, "5000 kz"→5000), senão null.
+   - "province"/"municipality": localização em Angola se mencionada (ex: "em Viana"→municipality "Viana"; "no Lobito"→municipality "Lobito"; "em Luanda"→province "Luanda"). Se não souberes se é província ou município, põe em municipality. Senão null.
    - "urgent": true se pedir urgência/hoje/já, senão false.
-   - "answer": uma frase curta e simpática a confirmar a procura (ex: "A procurar pintores até 10.000 Kz perto de si…").
+   - "answer": uma frase curta e simpática a confirmar a procura (ex: "A procurar cabeleireiros de corte escovinha perto de si…").
 2. "app_help" — dúvida sobre COMO usar o app, pagamentos, escrow, saque, etc.
    - "answer": resposta útil e concisa (2 a 5 frases).
    - "service" null, "maxBudget" null, "urgent" false.
@@ -70,11 +72,14 @@ export async function aiAssistantRoute(req: Request, res: Response) {
             properties: {
               action: { type: 'string', enum: ['search_providers', 'app_help'] },
               service: { type: ['string', 'null'] },
+              specialty: { type: ['string', 'null'] },
               maxBudget: { type: ['number', 'null'] },
+              province: { type: ['string', 'null'] },
+              municipality: { type: ['string', 'null'] },
               urgent: { type: 'boolean' },
               answer: { type: 'string' },
             },
-            required: ['action', 'service', 'maxBudget', 'urgent', 'answer'],
+            required: ['action', 'service', 'specialty', 'maxBudget', 'province', 'municipality', 'urgent', 'answer'],
           },
         },
       },
@@ -99,7 +104,10 @@ export async function aiAssistantRoute(req: Request, res: Response) {
       ok: true,
       action: parsed.action === 'search_providers' ? 'search_providers' : 'app_help',
       service,
+      specialty: parsed.specialty ? String(parsed.specialty).trim() : null,
       maxBudget: typeof parsed.maxBudget === 'number' ? parsed.maxBudget : null,
+      province: parsed.province ? String(parsed.province).trim() : null,
+      municipality: parsed.municipality ? String(parsed.municipality).trim() : null,
       urgent: parsed.urgent === true,
       answer: String(parsed.answer || '').trim(),
     });
